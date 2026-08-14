@@ -1,0 +1,6 @@
+name: regionbrainage
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.12
+  - pip
