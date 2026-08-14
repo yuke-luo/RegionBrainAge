@@ -58,13 +58,15 @@ Raw preprocessing also generates HTML/PNG slice views. Please inspect these imag
 The output directory contains:
 
 - `predictions.csv`: global brain-age predictions;
-- `regional_predictions.csv`: 222 regional predictions for each successfully processed image;
-- `roi_lookup.csv`: ROI identifiers, atlas sources and region names;
+- `regional_predictions.csv`: one row per successfully processed image, with regional age columns `roi_001` through `roi_222`;
+- `roi_lookup.csv`: the mapping from each regional prediction column to its ROI identifier, atlas source and region name;
 - `run_metadata.json`: model and prediction-run information;
 - `failures.csv`: images that could not be processed, when applicable;
 - `preprocessing_summary.csv` and `preprocessed/`: preprocessing results and quality-control images produced in raw mode.
 
-The primary global prediction is `global_age_direct`. Regional predictions are reported as `roi_conditioned_age` in years. A secondary ROI-aggregated global estimate is also included as `global_age_roi`.
+The prediction CSV files are updated and flushed to disk after each successfully processed image, so completed predictions remain available if a run is interrupted. Each row in `predictions.csv` has a matching row already saved in `regional_predictions.csv`. The final `run_metadata.json` is written when the run exits normally. An interrupted run is not resumed automatically; start a new run with a new or empty output directory.
+
+The primary global prediction is `global_age_direct`. Regional prediction columns contain ROI-conditioned age estimates in years; a blank value indicates that the ROI was not valid for that image. A secondary ROI-aggregated global estimate is also included as `global_age_roi`.
 
 Chronological age is not required for prediction. If a brain predicted age difference (brain-PAD) is needed, calculate it downstream as predicted age minus chronological age.
 

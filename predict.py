@@ -17,8 +17,10 @@ without downloading or regenerating atlases at prediction time.
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -325,7 +327,7 @@ def raw_to_preprocessed(
     subject_id: str,
     output_root: Path,
     tools: tuple[Path, str, str, str],
-) -> tuple[Path, dict[str, Any]]:
+) -> tuple[Path | None, dict[str, Any]]:
     template, reorient, synthstrip, flirt = tools
     record = preprocessing.preprocess_one(
         in_t1=input_path,
@@ -338,9 +340,7 @@ def raw_to_preprocessed(
         output_name=subject_id,
     )
     if record.get("status") != "ok":
-        raise RuntimeError(
-            f"Preprocessing failed at stage {record.get('fail_stage') or 'unknown'}."
-        )
+        return None, record
     subject_directory = Path(str(record["output_dir"])).resolve()
     result = subject_directory / f"{subject_directory.name}_brain_mni152_1mm.nii.gz"
     if not result.is_file():
@@ -350,6 +350,29 @@ def raw_to_preprocessed(
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def initialize_csv(path: Path, columns: list[str]) -> None:
+    """Create a header-only CSV and make the header durable on disk."""
+    with path.open("x", encoding="utf-8", newline="") as handle:
+        csv.DictWriter(handle, fieldnames=columns).writeheader()
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def append_csv_row(path: Path, row: dict[str, Any], columns: list[str]) -> None:
+    """Append one completed result and flush it so earlier work survives interruption."""
+    missing = [column for column in columns if column not in row]
+    if missing:
+        raise ValueError(f"CSV row for {path.name} is missing columns: {missing}")
+    write_header = not path.exists()
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="raise")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def verify_packaged_lookup(checkpoint_lookup: pd.DataFrame) -> None:
@@ -429,16 +452,46 @@ def run(arguments: argparse.Namespace) -> int:
         f"{model_metadata['checkpoint_endpoint']}"
     )
 
+    prediction_columns = [
+        "subject_id",
+        "input_filename",
+        "input_type",
+        "global_age_direct",
+        "global_age_roi",
+        "global_head_gap",
+        "num_valid_rois",
+        "num_missing_rois",
+        "registration_qc_status",
+        "model_id",
+        "run_id",
+    ]
+    roi_columns = [f"roi_{int(label):03d}" for label in lookup["label"]]
+    regional_columns = [
+        "subject_id",
+        "input_filename",
+        "input_type",
+        *roi_columns,
+        "model_id",
+        "run_id",
+    ]
+    failure_columns = ["subject_id", "input_filename", "error_type", "error"]
+    preprocessing_columns = ["subject_id", "status", "fail_stage", "skipped"]
+
+    output_lookup = lookup.copy()
+    output_lookup["prediction_column"] = roi_columns
+    output_lookup.to_csv(output / "roi_lookup.csv", index=False)
+    initialize_csv(output / "predictions.csv", prediction_columns)
+    initialize_csv(output / "regional_predictions.csv", regional_columns)
+
     prediction_rows: list[dict[str, Any]] = []
-    regional_frames: list[pd.DataFrame] = []
     failure_rows: list[dict[str, Any]] = []
     completed_inputs: list[dict[str, Any]] = []
-    preprocessing_rows: list[dict[str, Any]] = []
     preprocessed_root = output / "preprocessed"
 
     for index, record in enumerate(input_records, start=1):
         subject_id = str(record["subject_id"])
         input_path = Path(record["input_path"])
+        preprocessing_row = None
         print(f"[{index}/{len(input_records)}] {subject_id}", flush=True)
         try:
             if arguments.input_type == "raw":
@@ -450,14 +503,17 @@ def run(arguments: argparse.Namespace) -> int:
                     preprocessed_root,
                     raw_tools,
                 )
-                preprocessing_rows.append(
-                    {
-                        "subject_id": subject_id,
-                        "status": preprocessing_record.get("status"),
-                        "fail_stage": preprocessing_record.get("fail_stage"),
-                        "skipped": bool(preprocessing_record.get("skipped", False)),
-                    }
-                )
+                preprocessing_row = {
+                    "subject_id": subject_id,
+                    "status": preprocessing_record.get("status"),
+                    "fail_stage": preprocessing_record.get("fail_stage"),
+                    "skipped": bool(preprocessing_record.get("skipped", False)),
+                }
+                if model_input is None:
+                    raise RuntimeError(
+                        "Preprocessing failed at stage "
+                        f"{preprocessing_record.get('fail_stage') or 'unknown'}."
+                    )
                 registration_qc_status = "not_reviewed"
             else:
                 model_input = input_path
@@ -475,80 +531,79 @@ def run(arguments: argparse.Namespace) -> int:
             roi_global = float(outputs["global_age_roi"][0].detach().cpu().item())
             regional = outputs["regional_age"][0].detach().cpu().numpy().astype(np.float64)
             valid = outputs["roi_valid_mask"][0].detach().cpu().numpy().astype(bool)
+            if regional.shape != (222,) or valid.shape != (222,):
+                raise RuntimeError(
+                    "Model regional outputs must contain exactly 222 ROI values."
+                )
             regional[~valid] = np.nan
-            prediction_rows.append(
-                {
-                    "subject_id": subject_id,
-                    "input_filename": input_path.name,
-                    "input_type": arguments.input_type,
-                    "global_age_direct": direct,
-                    "global_age_roi": roi_global,
-                    "global_head_gap": abs(direct - roi_global),
-                    "num_valid_rois": int(valid.sum()),
-                    "num_missing_rois": int((~valid).sum()),
-                    "registration_qc_status": registration_qc_status,
-                    "model_id": model_id,
-                    "run_id": run_id,
-                }
-            )
-            frame = lookup.copy()
-            frame.insert(0, "subject_id", subject_id)
-            frame["roi_conditioned_age"] = regional
-            frame["roi_valid"] = valid
-            frame["model_id"] = model_id
-            frame["run_id"] = run_id
-            regional_frames.append(frame)
-            completed_inputs.append(
-                {
-                    "subject_id": subject_id,
-                    "filename": input_path.name,
-                    "input_sha256": record["input_sha256"],
-                    "model_input_sha256": sha256_file(model_input),
-                    "input_validation": image_metadata,
-                }
-            )
+            prediction_row = {
+                "subject_id": subject_id,
+                "input_filename": input_path.name,
+                "input_type": arguments.input_type,
+                "global_age_direct": direct,
+                "global_age_roi": roi_global,
+                "global_head_gap": abs(direct - roi_global),
+                "num_valid_rois": int(valid.sum()),
+                "num_missing_rois": int((~valid).sum()),
+                "registration_qc_status": registration_qc_status,
+                "model_id": model_id,
+                "run_id": run_id,
+            }
+            regional_row: dict[str, Any] = {
+                "subject_id": subject_id,
+                "input_filename": input_path.name,
+                "input_type": arguments.input_type,
+                "model_id": model_id,
+                "run_id": run_id,
+            }
+            for column, value, is_valid in zip(
+                roi_columns, regional, valid, strict=True
+            ):
+                regional_row[column] = float(value) if is_valid else None
+            completed_input = {
+                "subject_id": subject_id,
+                "filename": input_path.name,
+                "input_sha256": record["input_sha256"],
+                "model_input_sha256": sha256_file(model_input),
+                "input_validation": image_metadata,
+            }
             del outputs, image_tensor, label_tensor
             if device.type == "cuda":
                 torch.cuda.empty_cache()
         except Exception as exc:  # preserve other inputs while recording exact failures
-            failure_rows.append(
-                {
-                    "subject_id": subject_id,
-                    "input_filename": input_path.name,
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                }
-            )
+            if preprocessing_row is not None:
+                append_csv_row(
+                    output / "preprocessing_summary.csv",
+                    preprocessing_row,
+                    preprocessing_columns,
+                )
+            failure_row = {
+                "subject_id": subject_id,
+                "input_filename": input_path.name,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            append_csv_row(output / "failures.csv", failure_row, failure_columns)
+            failure_rows.append(failure_row)
             print(f"  FAILED: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             if device.type == "cuda":
                 torch.cuda.empty_cache()
+            continue
 
-    prediction_columns = [
-        "subject_id",
-        "input_filename",
-        "input_type",
-        "global_age_direct",
-        "global_age_roi",
-        "global_head_gap",
-        "num_valid_rois",
-        "num_missing_rois",
-        "registration_qc_status",
-        "model_id",
-        "run_id",
-    ]
-    predictions = pd.DataFrame(prediction_rows, columns=prediction_columns)
-    predictions.to_csv(output / "predictions.csv", index=False)
-    if regional_frames:
-        pd.concat(regional_frames, ignore_index=True).to_csv(
-            output / "regional_predictions.csv", index=False
+        if preprocessing_row is not None:
+            append_csv_row(
+                output / "preprocessing_summary.csv",
+                preprocessing_row,
+                preprocessing_columns,
+            )
+        # Persist the regional row first; predictions.csv then marks a fully saved subject.
+        append_csv_row(
+            output / "regional_predictions.csv", regional_row, regional_columns
         )
-    lookup.to_csv(output / "roi_lookup.csv", index=False)
-    if failure_rows:
-        pd.DataFrame(failure_rows).to_csv(output / "failures.csv", index=False)
-    if preprocessing_rows:
-        pd.DataFrame(preprocessing_rows).to_csv(
-            output / "preprocessing_summary.csv", index=False
-        )
+        append_csv_row(output / "predictions.csv", prediction_row, prediction_columns)
+        prediction_rows.append(prediction_row)
+        completed_inputs.append(completed_input)
+        print("  prediction saved", flush=True)
 
     status = (
         "complete"
@@ -569,7 +624,7 @@ def run(arguments: argparse.Namespace) -> int:
         "device": str(device),
         "device_selection": device_selection,
         "primary_output": "global_age_direct",
-        "secondary_outputs": ["global_age_roi", "roi_conditioned_age"],
+        "secondary_outputs": ["global_age_roi", "regional_roi_ages"],
         "model": model_metadata,
         "atlas": {
             "filename": atlas_path.name,
