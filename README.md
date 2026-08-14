@@ -64,8 +64,6 @@ The output directory contains:
 - `failures.csv`: images that could not be processed, when applicable;
 - `preprocessing_summary.csv` and `preprocessed/`: preprocessing results and quality-control images produced in raw mode.
 
-The prediction CSV files are updated and flushed to disk after each successfully processed image, so completed predictions remain available if a run is interrupted. Each row in `predictions.csv` has a matching row already saved in `regional_predictions.csv`. The final `run_metadata.json` is written when the run exits normally. An interrupted run is not resumed automatically; start a new run with a new or empty output directory.
-
 The primary global prediction is `global_age_direct`. Regional prediction columns contain ROI-conditioned age estimates in years; a blank value indicates that the ROI was not valid for that image. A secondary ROI-aggregated global estimate is also included as `global_age_roi`.
 
 Chronological age is not required for prediction. If a brain predicted age difference (brain-PAD) is needed, calculate it downstream as predicted age minus chronological age.
