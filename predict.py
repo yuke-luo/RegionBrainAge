@@ -36,7 +36,7 @@ if str(RELEASE_ROOT) not in sys.path:
     sys.path.insert(0, str(RELEASE_ROOT))
 
 import preprocessing  # noqa: E402
-from Scripts.checkpoint import load_model, sha256_file, validate_lookup  # noqa: E402
+from scripts.checkpoint import load_model, sha256_file, validate_lookup  # noqa: E402
 
 
 DEFAULT_MODEL = RELEASE_ROOT / "model" / "densenet121_w0p1.pt"
