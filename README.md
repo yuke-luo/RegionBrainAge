@@ -21,7 +21,7 @@ The prediction script automatically uses a CUDA GPU when one is available and ot
 Prediction from raw images additionally requires:
 
 - [FSL 6.0.7.22](https://fsl.fmrib.ox.ac.uk/fsl/docs/) for image reorientation, affine registration and visual quality-control images;
-- [FreeSurfer 7.4.1 (SynthStrip)](https://surfer.nmr.mgh.harvard.edu/docs/synthstrip/) for brain extraction.
+- [FreeSurfer 7.4.1 (SynthStrip)](https://surfer.nmr.mgh.harvard.edu/fswiki/DownloadAndInstall) for brain extraction.
 
 These are the versions used and recommended for reproducibility, other recent versions may be compatible. These external programs are not required for images that have already been preprocessed.
 
