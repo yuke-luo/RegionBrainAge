@@ -10,25 +10,14 @@ The 222 regions comprise 200 cortical parcels from the Schaefer atlas, 15 subcor
 
 RegionBrainAge requires Python 3.12 and accepts T1-weighted images in NIfTI format (`.nii` or `.nii.gz`).
 
-Create and activate the Conda environment, confirm the active interpreter and install the Python dependencies with:
+Create and activate the Conda environment, then install the Python dependencies with:
 
 ```bash
 conda env create -f environment.yml
 conda activate regionbrainage
 
-python --version
-python -c "import sys; print(sys.executable)"
 python -m pip install -r requirements.txt
 python -m pip check
-```
-
-Python should report version `3.12.12`, and the interpreter path should be under `$CONDA_PREFIX/bin`. Using [`python -m pip`](https://pip.pypa.io/en/stable/cli/pip_install/) ensures that packages are installed with the active Python interpreter.
-
-If Python incorrectly resolves to `$FSLDIR/bin/python`, restore the Conda environment to the front of `PATH` and repeat the interpreter checks:
-
-```bash
-export PATH="$CONDA_PREFIX/bin:$PATH"
-hash -r
 ```
 
 The prediction script automatically uses a CUDA GPU when one is available and otherwise runs on the CPU.
