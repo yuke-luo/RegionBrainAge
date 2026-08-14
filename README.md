@@ -68,12 +68,6 @@ The primary global prediction is `global_age_direct`. Regional predictions are r
 
 Chronological age is not required for prediction. If a brain predicted age difference (brain-PAD) is needed, calculate it downstream as predicted age minus chronological age.
 
-## Interpretation
-
-The model was trained using chronological age in healthy participants because no directly observed regional biological-age target exists. Regional predictions should therefore be treated as exploratory model-derived measures, not as independent biological ages or validated regional disease biomarkers.
-
-The model uses a fixed template-space atlas rather than an individualized anatomical parcellation. Prediction quality may be affected by image quality, registration accuracy, scanner differences and populations not represented during model development.
-
 
 ## Citation
 
