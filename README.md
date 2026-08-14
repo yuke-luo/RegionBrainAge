@@ -16,7 +16,16 @@ Install the Python dependencies with:
 pip install -r requirements.txt
 ```
 
-The prediction script automatically uses a CUDA GPU when one is available and otherwise runs on the CPU.
+The released model was trained with PyTorch 2.5.1 and CUDA 12.1, but that old
+build is not required for inference. Install a recent PyTorch build compatible
+with your hardware. NVIDIA Blackwell GPUs require PyTorch 2.7 or newer with a
+CUDA 12.8-or-newer build; the [PyTorch installation selector](https://pytorch.org/get-started/locally/)
+provides the appropriate command.
+
+The prediction script tests CUDA before loading the model. It uses the GPU when
+the test succeeds and otherwise falls back to the CPU. Use `--device cpu` to
+select the CPU explicitly or `--device cuda` to require CUDA and fail early with
+an actionable compatibility error.
 
 Prediction from raw images additionally requires:
 

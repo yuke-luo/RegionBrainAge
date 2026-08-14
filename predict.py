@@ -83,6 +83,15 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     command.add_argument("--output-dir", required=True, help="A new or empty output directory.")
+    command.add_argument(
+        "--device",
+        default="auto",
+        choices=("auto", "cpu", "cuda"),
+        help=(
+            "Inference device (default: auto). Auto tests CUDA before use and "
+            "falls back to CPU when the installed PyTorch build cannot run on the GPU."
+        ),
+    )
     return command
 
 
@@ -127,16 +136,79 @@ def safe_subject_ids(files: list[Path], input_root: Path) -> list[str]:
     return sanitized
 
 
-def resolve_device(value: str) -> torch.device:
-    if value == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def cuda_device_details(device: torch.device) -> dict[str, Any]:
+    """Return JSON-safe CUDA details without assuming the GPU is executable."""
+    details: dict[str, Any] = {
+        "torch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda,
+    }
     try:
-        device = torch.device(value)
-    except (TypeError, RuntimeError) as exc:
-        raise ValueError(f"Invalid torch device {value!r}.") from exc
-    if device.type == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("A CUDA device was requested, but CUDA is unavailable.")
-    return device
+        details["gpu_name"] = torch.cuda.get_device_name(device)
+    except Exception as exc:
+        details["gpu_name_error"] = f"{type(exc).__name__}: {exc}"
+    try:
+        major, minor = torch.cuda.get_device_capability(device)
+        details["gpu_compute_capability"] = f"{major}.{minor}"
+    except Exception as exc:
+        details["gpu_compute_capability_error"] = f"{type(exc).__name__}: {exc}"
+    return details
+
+
+def cuda_execution_error(device: torch.device) -> str | None:
+    """Run and synchronize a real CUDA kernel, returning its error if unusable."""
+    try:
+        with torch.inference_mode():
+            probe = torch.ones(16, device=device)
+            result = (probe + 1.0).sum()
+            torch.cuda.synchronize(device)
+            if float(result.item()) != 32.0:
+                raise RuntimeError("CUDA execution probe returned an unexpected result.")
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {' '.join(str(exc).splitlines())}"
+
+
+def resolve_device(value: str) -> tuple[torch.device, dict[str, Any]]:
+    """Resolve the device and verify CUDA can execute before loading the model."""
+    requested = value.lower()
+    selection: dict[str, Any] = {
+        "requested": requested,
+        "torch_version": torch.__version__,
+        "torch_cuda_version": torch.version.cuda,
+    }
+    if requested == "cpu":
+        selection.update({"resolved": "cpu", "reason": "explicit_cpu"})
+        return torch.device("cpu"), selection
+    if requested not in {"auto", "cuda"}:
+        raise ValueError(f"Invalid torch device {value!r}.")
+    if not torch.cuda.is_available():
+        if requested == "cuda":
+            raise RuntimeError(
+                "CUDA was requested, but PyTorch cannot access a CUDA device. "
+                "Use --device cpu or install a PyTorch build compatible with this system."
+            )
+        selection.update({"resolved": "cpu", "reason": "cuda_unavailable"})
+        return torch.device("cpu"), selection
+
+    cuda_device = torch.device("cuda")
+    selection.update(cuda_device_details(cuda_device))
+    probe_error = cuda_execution_error(cuda_device)
+    if probe_error is None:
+        selection.update({"resolved": "cuda", "reason": "cuda_probe_passed"})
+        return cuda_device, selection
+
+    selection["cuda_probe_error"] = probe_error
+    gpu_description = selection.get("gpu_name", "the detected GPU")
+    compatibility_message = (
+        f"The installed PyTorch build cannot execute CUDA kernels on {gpu_description} "
+        f"({probe_error}). Install a PyTorch build compatible with this GPU, or use CPU."
+    )
+    if requested == "cuda":
+        raise RuntimeError(compatibility_message)
+
+    selection.update({"resolved": "cpu", "reason": "cuda_probe_failed_cpu_fallback"})
+    print(f"RegionBrainAge: {compatibility_message} Falling back to CPU.", file=sys.stderr)
+    return torch.device("cpu"), selection
 
 
 def singleton_three_dimensional(data: np.ndarray, name: str) -> np.ndarray:
@@ -301,7 +373,8 @@ def run(arguments: argparse.Namespace) -> int:
     observed_model_hash = sha256_file(model_path)
     if observed_model_hash != EXPECTED_MODEL_SHA256:
         raise RuntimeError("The bundled model checksum is incorrect.")
-    device = resolve_device("auto")
+    device, device_selection = resolve_device(arguments.device)
+    print(f"Inference device: {device}", flush=True)
     model, lookup, model_metadata = load_model(model_path, device=device)
     verify_packaged_lookup(lookup)
     unmasked_atlas, atlas_sha256 = load_atlas(atlas_path)
@@ -494,6 +567,7 @@ def run(arguments: argparse.Namespace) -> int:
         "n_predicted": len(prediction_rows),
         "n_failed": len(failure_rows),
         "device": str(device),
+        "device_selection": device_selection,
         "primary_output": "global_age_direct",
         "secondary_outputs": ["global_age_roi", "roi_conditioned_age"],
         "model": model_metadata,
