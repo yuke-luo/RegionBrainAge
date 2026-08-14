@@ -16,16 +16,7 @@ Install the Python dependencies with:
 pip install -r requirements.txt
 ```
 
-The released model was trained with PyTorch 2.5.1 and CUDA 12.1, but that old
-build is not required for inference. Install a recent PyTorch build compatible
-with your hardware. NVIDIA Blackwell GPUs require PyTorch 2.7 or newer with a
-CUDA 12.8-or-newer build; the [PyTorch installation selector](https://pytorch.org/get-started/locally/)
-provides the appropriate command.
-
-The prediction script tests CUDA before loading the model. It uses the GPU when
-the test succeeds and otherwise falls back to the CPU. Use `--device cpu` to
-select the CPU explicitly or `--device cuda` to require CUDA and fail early with
-an actionable compatibility error.
+The prediction script automatically uses a CUDA GPU when one is available and otherwise runs on the CPU.
 
 Prediction from raw images additionally requires:
 
@@ -76,7 +67,6 @@ The output directory contains:
 The primary global prediction is `global_age_direct`. Regional predictions are reported as `roi_conditioned_age` in years. A secondary ROI-aggregated global estimate is also included as `global_age_roi`.
 
 Chronological age is not required for prediction. If a brain predicted age difference (brain-PAD) is needed, calculate it downstream as predicted age minus chronological age.
-
 
 ## Citation
 
