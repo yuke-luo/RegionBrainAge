@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.DS_Store
+
+# Keep participant data and generated predictions out of the software repository.
+/results/
+/corrected_results/
+/ages.csv

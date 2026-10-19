@@ -12,6 +12,9 @@ type must be declared explicitly:
 The bundled template-grid 222-ROI map is masked by each subject's nonzero brain
 mask, reproducing the label construction used by the training data loader
 without downloading or regenerating atlases at prediction time.
+
+All predictions are raw, uncorrected ages in years. Optional validation-fitted
+age-bias correction is a separate post-processing step in ``correct_age.py``.
 """
 
 from __future__ import annotations
@@ -625,6 +628,8 @@ def run(arguments: argparse.Namespace) -> int:
         "device_selection": device_selection,
         "primary_output": "global_age_direct",
         "secondary_outputs": ["global_age_roi", "regional_roi_ages"],
+        "prediction_scale": "raw",
+        "age_bias_correction_applied": False,
         "model": model_metadata,
         "atlas": {
             "filename": atlas_path.name,
