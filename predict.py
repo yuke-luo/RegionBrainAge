@@ -13,7 +13,7 @@ The bundled template-grid 222-ROI map is masked by each subject's nonzero brain
 mask, reproducing the label construction used by the training data loader
 without downloading or regenerating atlases at prediction time.
 
-All predictions are raw, uncorrected ages in years. Optional validation-fitted
+All predictions are raw, uncorrected ages in years. Validation-fitted
 age-bias correction is a separate post-processing step in ``correct_age.py``.
 """
 
@@ -26,7 +26,6 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -141,24 +140,6 @@ def safe_subject_ids(files: list[Path], input_root: Path) -> list[str]:
     return sanitized
 
 
-def cuda_device_details(device: torch.device) -> dict[str, Any]:
-    """Return JSON-safe CUDA details without assuming the GPU is executable."""
-    details: dict[str, Any] = {
-        "torch_version": torch.__version__,
-        "torch_cuda_version": torch.version.cuda,
-    }
-    try:
-        details["gpu_name"] = torch.cuda.get_device_name(device)
-    except Exception as exc:
-        details["gpu_name_error"] = f"{type(exc).__name__}: {exc}"
-    try:
-        major, minor = torch.cuda.get_device_capability(device)
-        details["gpu_compute_capability"] = f"{major}.{minor}"
-    except Exception as exc:
-        details["gpu_compute_capability_error"] = f"{type(exc).__name__}: {exc}"
-    return details
-
-
 def cuda_execution_error(device: torch.device) -> str | None:
     """Run and synchronize a real CUDA kernel, returning its error if unusable."""
     try:
@@ -173,17 +154,11 @@ def cuda_execution_error(device: torch.device) -> str | None:
         return f"{type(exc).__name__}: {' '.join(str(exc).splitlines())}"
 
 
-def resolve_device(value: str) -> tuple[torch.device, dict[str, Any]]:
+def resolve_device(value: str) -> torch.device:
     """Resolve the device and verify CUDA can execute before loading the model."""
     requested = value.lower()
-    selection: dict[str, Any] = {
-        "requested": requested,
-        "torch_version": torch.__version__,
-        "torch_cuda_version": torch.version.cuda,
-    }
     if requested == "cpu":
-        selection.update({"resolved": "cpu", "reason": "explicit_cpu"})
-        return torch.device("cpu"), selection
+        return torch.device("cpu")
     if requested not in {"auto", "cuda"}:
         raise ValueError(f"Invalid torch device {value!r}.")
     if not torch.cuda.is_available():
@@ -192,18 +167,17 @@ def resolve_device(value: str) -> tuple[torch.device, dict[str, Any]]:
                 "CUDA was requested, but PyTorch cannot access a CUDA device. "
                 "Use --device cpu or install a PyTorch build compatible with this system."
             )
-        selection.update({"resolved": "cpu", "reason": "cuda_unavailable"})
-        return torch.device("cpu"), selection
+        return torch.device("cpu")
 
     cuda_device = torch.device("cuda")
-    selection.update(cuda_device_details(cuda_device))
     probe_error = cuda_execution_error(cuda_device)
     if probe_error is None:
-        selection.update({"resolved": "cuda", "reason": "cuda_probe_passed"})
-        return cuda_device, selection
+        return cuda_device
 
-    selection["cuda_probe_error"] = probe_error
-    gpu_description = selection.get("gpu_name", "the detected GPU")
+    try:
+        gpu_description = torch.cuda.get_device_name(cuda_device)
+    except Exception:
+        gpu_description = "the detected GPU"
     compatibility_message = (
         f"The installed PyTorch build cannot execute CUDA kernels on {gpu_description} "
         f"({probe_error}). Install a PyTorch build compatible with this GPU, or use CPU."
@@ -211,9 +185,8 @@ def resolve_device(value: str) -> tuple[torch.device, dict[str, Any]]:
     if requested == "cuda":
         raise RuntimeError(compatibility_message)
 
-    selection.update({"resolved": "cpu", "reason": "cuda_probe_failed_cpu_fallback"})
     print(f"RegionBrainAge: {compatibility_message} Falling back to CPU.", file=sys.stderr)
-    return torch.device("cpu"), selection
+    return torch.device("cpu")
 
 
 def singleton_three_dimensional(data: np.ndarray, name: str) -> np.ndarray:
@@ -261,7 +234,7 @@ def load_atlas(path: Path) -> tuple[np.ndarray, str]:
 def load_and_normalize_image(
     path: Path,
     unmasked_atlas: np.ndarray,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     image_nifti = nib.load(str(path))
     validate_mni_geometry(image_nifti, "T1 image")
     image = singleton_three_dimensional(
@@ -282,19 +255,9 @@ def load_and_normalize_image(
     normalized[brain_mask] = (values - mean) / std
     labels = unmasked_atlas.copy()
     labels[~brain_mask] = 0
-    present = np.unique(labels)
-    present_positive = present[present > 0]
-    metadata = {
-        "brain_voxels": brain_voxels,
-        "brain_fraction": float(brain_mask.mean()),
-        "intensity_mean_before_normalization": mean,
-        "intensity_std_before_normalization": std,
-        "num_full_resolution_rois_present": int(len(present_positive)),
-        "num_full_resolution_rois_missing": int(222 - len(present_positive)),
-    }
     image_tensor = torch.from_numpy(normalized[None, None, ...])
     label_tensor = torch.from_numpy(labels.astype(np.int64, copy=False)[None, ...])
-    return image_tensor, label_tensor, metadata
+    return image_tensor, label_tensor
 
 
 def prepare_raw_tools(synthstrip_argument: str | None) -> tuple[Path, str, str, str]:
@@ -351,10 +314,6 @@ def raw_to_preprocessed(
     return result, record
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-
 def initialize_csv(path: Path, columns: list[str]) -> None:
     """Create a header-only CSV and make the header durable on disk."""
     with path.open("x", encoding="utf-8", newline="") as handle:
@@ -399,7 +358,7 @@ def run(arguments: argparse.Namespace) -> int:
     observed_model_hash = sha256_file(model_path)
     if observed_model_hash != EXPECTED_MODEL_SHA256:
         raise RuntimeError("The bundled model checksum is incorrect.")
-    device, device_selection = resolve_device(arguments.device)
+    device = resolve_device(arguments.device)
     print(f"Inference device: {device}", flush=True)
     model, lookup, model_metadata = load_model(model_path, device=device)
     verify_packaged_lookup(lookup)
@@ -486,9 +445,8 @@ def run(arguments: argparse.Namespace) -> int:
     initialize_csv(output / "predictions.csv", prediction_columns)
     initialize_csv(output / "regional_predictions.csv", regional_columns)
 
-    prediction_rows: list[dict[str, Any]] = []
-    failure_rows: list[dict[str, Any]] = []
-    completed_inputs: list[dict[str, Any]] = []
+    n_predicted = 0
+    n_failed = 0
     preprocessed_root = output / "preprocessed"
 
     for index, record in enumerate(input_records, start=1):
@@ -522,7 +480,7 @@ def run(arguments: argparse.Namespace) -> int:
                 model_input = input_path
                 registration_qc_status = "not_recorded"
 
-            image_tensor, label_tensor, image_metadata = load_and_normalize_image(
+            image_tensor, label_tensor = load_and_normalize_image(
                 model_input, unmasked_atlas
             )
             with torch.inference_mode():
@@ -563,13 +521,6 @@ def run(arguments: argparse.Namespace) -> int:
                 roi_columns, regional, valid, strict=True
             ):
                 regional_row[column] = float(value) if is_valid else None
-            completed_input = {
-                "subject_id": subject_id,
-                "filename": input_path.name,
-                "input_sha256": record["input_sha256"],
-                "model_input_sha256": sha256_file(model_input),
-                "input_validation": image_metadata,
-            }
             del outputs, image_tensor, label_tensor
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -587,7 +538,7 @@ def run(arguments: argparse.Namespace) -> int:
                 "error": str(exc),
             }
             append_csv_row(output / "failures.csv", failure_row, failure_columns)
-            failure_rows.append(failure_row)
+            n_failed += 1
             print(f"  FAILED: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -604,56 +555,21 @@ def run(arguments: argparse.Namespace) -> int:
             output / "regional_predictions.csv", regional_row, regional_columns
         )
         append_csv_row(output / "predictions.csv", prediction_row, prediction_columns)
-        prediction_rows.append(prediction_row)
-        completed_inputs.append(completed_input)
+        n_predicted += 1
         print("  prediction saved", flush=True)
 
     status = (
         "complete"
-        if prediction_rows and not failure_rows
+        if n_predicted and not n_failed
         else "partial"
-        if prediction_rows
+        if n_predicted
         else "failed"
     )
-    metadata = {
-        "status": status,
-        "created_at_utc": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "run_id": run_id,
-        "model_id": model_id,
-        "input_type": arguments.input_type,
-        "n_inputs": len(input_records),
-        "n_predicted": len(prediction_rows),
-        "n_failed": len(failure_rows),
-        "device": str(device),
-        "device_selection": device_selection,
-        "primary_output": "global_age_direct",
-        "secondary_outputs": ["global_age_roi", "regional_roi_ages"],
-        "prediction_scale": "raw",
-        "age_bias_correction_applied": False,
-        "model": model_metadata,
-        "atlas": {
-            "filename": atlas_path.name,
-            "sha256": atlas_sha256,
-            "labels": [0, 222],
-            "shape": list(EXPECTED_MNI_SHAPE),
-            "construction": (
-                "Unmasked template-grid Schaefer-200, Harvard-Oxford-15 and "
-                "Buckner-7 composite; masked by each nonzero subject brain mask."
-            ),
-        },
-        "inputs": completed_inputs,
-        "failures": failure_rows,
-        "interpretation": (
-            "Regional outputs are ROI-conditioned chronological-age estimates, "
-            "not observed regional biological ages."
-        ),
-    }
-    write_json(output / "run_metadata.json", metadata)
     print(
-        f"RegionBrainAge {status}: predicted {len(prediction_rows)}/{len(input_records)} "
+        f"RegionBrainAge {status}: predicted {n_predicted}/{len(input_records)} "
         f"input(s). Outputs: {output}"
     )
-    return 0 if prediction_rows and not failure_rows else 1
+    return 0 if n_predicted and not n_failed else 1
 
 
 def main(argv: Iterable[str] | None = None) -> int:
